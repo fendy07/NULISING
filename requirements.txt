@@ -1,0 +1,11 @@
+pytorch
+pandas
+opencv-python
+pillow
+numpy
+scikit-learn
+gradio
+matplotlib
+seaborn
+onnxscript
+onnxruntime
