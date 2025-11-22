@@ -1,4 +1,5 @@
-pytorch
+torch
+torchvision
 pandas
 opencv-python
 pillow
