@@ -1,0 +1,279 @@
+# Import Library
+import os
+import cv2
+import PIL
+import json
+import time
+import torch
+import random
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from PIL import Image
+import torch.nn as nn
+from torchvision import models
+from tqdm.notebook import tqdm
+import matplotlib.pyplot as plt
+from torchvision import models
+from torch.nn import functional as F
+from torchvision import transforms as T
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Load Dataset
+image = []
+label = []
+
+for dirname, _, filenames in os.walk('/content/drive/MyDrive/Proyek/Computer Vision/Komering Character/Data'):
+  for filename in filenames:
+    if filename.endswith('.png') or filename.endswith('.jpg'):
+      image.append(os.path.join(dirname, filename).split('/')[-1])
+      label.append(os.path.join(dirname, filename).split('/')[-2])
+
+# Load images dataset
+IMAGE_PATH = '/content/drive/MyDrive/Proyek/Computer Vision/Komering Character/Data/'
+
+df_full = pd.DataFrame({'image_id':image, 'label':label})
+
+# FINDING BAD FILE
+
+index = []
+for i in range(len(df_full)):
+    try:
+        Image.open(IMAGE_PATH + str(df_full['label'].values[i]) + '/' + str(df_full['image_id'].values[i]))
+
+    except PIL.UnidentifiedImageError:
+        index.append(i)
+
+df = df_full.drop(index)
+df.head()
+
+label = ['a', 'ba', 'ca', 'da', 'ga', 'ha', 'ja', 'ka', 'la', 'ma', 'mba',
+         'mpa', 'na', 'nca', 'nda', 'nga', 'ngka', 'nja', 'pa', 'ra', 'rha-gha',
+         'sa', 'ta', 'wa', 'ya']
+
+ints = np.arange(0, len(label))
+dicts = dict(zip(label, ints))
+
+class Komering(Dataset):
+  def __init__(self, x, y, path, maps_label = dicts, transform=None):
+    self.X = x
+    self.y = y
+    self.path = path
+    self.dicts = maps_label
+    self.transform = transform
+
+  def __getitem__(self, idx):
+    # Ensure the image is in RGB format for consistency with a 3-channel model input
+    img = Image.open(self.path + str(self.y[idx]) + '/' + str(self.X[idx])).convert('RGB')
+    label = self.y[idx]
+    label = self.label_2_ints(label)
+
+    if self.transform is not None:
+      img = self.transform(img)
+
+    return img, label
+
+  def label_2_ints(self, x):
+    label_id = None
+    for key, values in self.dicts.items():
+      if x == key:
+        label_id = values
+    return label_id
+
+  def __len__(self):
+    return len(self.X)
+
+# Splitting train and test images
+X_trainval, X_test, y_trainval, y_test = train_test_split(df['image_id'].values, df['label'].values,
+                                                          test_size = 0.2, stratify = df['label'].values,
+                                                          random_state = 8)
+
+X_train, X_val, y_train, y_val = train_test_split(X_trainval, y_trainval,
+                                                  stratify = y_trainval, test_size = 0.2,
+                                                  random_state = 8)
+len(X_train), len(X_val), len(X_test)
+
+# Data Augmentation
+"""Transform images to tensor with resize, rotation and cropping images"""
+train_transform = T.Compose([T.Resize((50, 50)),
+                             T.RandomRotation((5, 30)),
+                             T.RandomAffine((0, 50)),
+                             T.RandomCrop(size=(50, 50)),
+                             T.ToTensor()])
+
+val_transform = T.Compose([T.Resize((50, 50)),
+                           T.ToTensor()])
+
+train_set = Komering(X_train, y_train, IMAGE_PATH, transform = train_transform)
+val_set = Komering(X_val, y_val, IMAGE_PATH, transform = val_transform)
+test_set = Komering(X_test, y_test, IMAGE_PATH, transform = val_transform)
+
+BATCH_SIZE = 64
+train_loader = DataLoader(train_set, batch_size = BATCH_SIZE, shuffle = True)
+val_loader = DataLoader(val_set, batch_size = BATCH_SIZE, shuffle = False)
+
+img, label = train_set[random.randint(0, len(X_train))]
+
+plt.imshow(img.permute(1, 2, 0))
+
+img, label = test_set[random.randint(0, len(X_test))]
+
+plt.imshow(img.permute(1, 2, 0))
+
+# Modelling using ResNet18
+model = models.resnet18(pretrained=True)
+model.fc = nn.Linear(in_features = 512, out_features = len(dicts), bias = True)
+#model.classifier[6] = nn.Linear(4096, 20)
+model
+
+# Accuracy
+def accuracy(output, label):
+  with torch.no_grad():
+    output = torch.argmax(F.softmax(output, dim=1), dim=1)
+    correct = torch.eq(output, label).int()
+    accuracy = float(correct.sum()) / float(correct.numel())
+  return accuracy
+
+epoch = 50
+# Learning rate with 0.001
+lr = 1e-3
+
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr = lr, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr = lr, epochs=epoch,
+                                               steps_per_epoch=len(train_loader))
+
+train_losses = []
+val_losses =[]
+train_accuracy = []
+val_acc = []
+
+for e in range(epoch):
+  model.to(device)
+  model.train()
+
+  train_loss = 0
+  train_acc = 0
+  since = time.time()
+
+  for image, label in tqdm(train_loader, total=len(train_loader)):
+    optimizer.zero_grad()
+
+    image = image.to(device)
+    label = label.to(device)
+
+    output = model(image)
+    loss = criterion(output, label)
+
+    train_loss += loss
+    train_acc += accuracy(output, label)
+
+    loss.backward()
+    optimizer.step()
+
+
+    scheduler.step()
+
+  else:
+    with torch.no_grad():
+      model.eval()
+
+      running_loss = 0
+      val_accuracy = 0
+
+      for image, label in val_loader:
+        image = image.to(device)
+        label = label.to(device)
+
+        output = model(image)
+        loss = criterion(output, label)
+        val_accuracy += accuracy(output, label)
+        running_loss += loss
+
+  train_losses.append((train_loss/len(train_loader)).item())
+  val_losses.append((running_loss/len(val_loader)).item())
+  train_accuracy.append(train_acc/ len(train_loader))
+  val_acc.append(val_accuracy/len(val_loader))
+
+  print('epochs {}/{}..'.format(e+1, epoch),
+        'train loss {:.3f}..'.format(train_loss/len(train_loader)),
+        'val loss {:.3f}..'.format(running_loss/len(val_loader)),
+        'train accuracy {:.3f}..'.format(train_acc/ len(train_loader)),
+        'val accuracy {:.3f}..'.format(val_accuracy/len(val_loader)),
+        'time {:.3f} s'.format(time.time() - since))
+
+plt.plot(train_accuracy)
+plt.plot(val_acc)
+
+plt.plot(train_losses)
+plt.plot(val_losses)
+
+# Predict the Model
+def predict(model, img, label):
+  model.eval()
+  with torch.no_grad():
+    img = img.unsqueeze(0).to(device)
+    output = model(img)
+    pred = torch.argmax(F.softmax(output, dim=1)).cpu().item()
+  return pred
+
+test_predict = []
+true_label = []
+
+for i in range(len(test_set)):
+  img, label = test_set[i]
+  prediction = predict(model, img, label)
+  test_predict.append(prediction)
+  true_label.append(label)
+
+# Confusion Matrix
+plt.figure(figsize=(12, 12))
+sns.heatmap(confusion_matrix(true_label, test_predict), annot=True, cmap='GnBu')
+plt.xticks(ticks=np.arange(0, len(list(dicts.keys()))), labels = list(dicts.keys()), rotation=90)
+plt.yticks(ticks=np.arange(0, len(list(dicts.keys()))), labels = list(dicts.keys()))
+plt.title('Confusion Matrix Komering Script Recognition Using Pretrained Model')
+plt.show()
+
+print(classification_report(true_label, test_predict))
+
+# Define the label list
+labels = ['a', 'ba', 'ca', 'da', 'ga', 'ha', 'ja', 'ka', 'la', 'ma', 'mba',
+         'mpa', 'na', 'nca', 'nda', 'nga', 'ngka', 'nja', 'pa', 'ra', 'rha-gha',
+         'sa', 'ta', 'wa', 'ya']
+
+# Create a dictionary for label-to-index mapping
+label_to_index = {label: i for i, label in enumerate(labels)}
+
+def index_to_label(x):
+    return labels[x]
+
+random_selection = np.random.randint(0, len(test_predict), 20)
+
+fig = plt.figure(figsize=(15, 10))
+
+for i, idx in enumerate(random_selection):
+    image, label = test_set[idx]
+    ax = fig.add_subplot(4, 5, i+1, xticks=[], yticks=[])
+    ax.imshow(image.permute(1, 2, 0))
+    ax.set_title('True:{} | Predict:{}'.format(index_to_label(label), index_to_label(test_predict[idx])),
+                 color=("green" if label == test_predict[idx] else 'red'), fontsize=12)
+
+# plt.tight_layout()  # Commented out as per your request
+plt.show()
+
+# Save the model
+
+torch.save(model.state_dict(), '/content/drive/MyDrive/Proyek/Computer Vision/Komering Character/model/komering_character_resnet18.pth')
+
+# Assuming your model is named 'model'
+model_state_dict = model.state_dict()
+
+# Convert the state dictionary to a regular Python dictionary
+model_dict = {k: v.cpu().numpy().tolist() for k, v in model_state_dict.items()}
+
+# Save the dictionary as a JSON file
+with open('/content/drive/MyDrive/Proyek/Computer Vision/Komering Character/model/komering_character_resnet18.json', 'w') as f:
+    json.dump(model_dict, f)
