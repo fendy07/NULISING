@@ -1,9 +1,8 @@
 from flask import Flask, request, jsonify
 from PIL import Image
 import io, base64, os, time
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
+import numpy as np
+import onnxruntime as ort
 
 app = Flask(__name__)
 
@@ -11,53 +10,49 @@ app = Flask(__name__)
 BASE_SAVE_FOLDER = 'static/rawdata'
 os.makedirs(BASE_SAVE_FOLDER, exist_ok=True)
 
-# Labels (model output)
+# Labels
 labels = ['a', 'ba', 'ca', 'da', 'ga', 'ha', 'ja', 'ka', 'la', 'ma', 'mba',
           'mpa', 'na', 'nca', 'nda', 'nga', 'ngka', 'nja', 'pa', 'ra', 'rha-gha',
           'sa', 'ta', 'wa', 'ya']
 
-# Fixed input size
-IMG_SIZE = (50, 50)  # resize all images to 50x50
+# Load ONNX model
+onnx_model_path = "../komering_character_resnet18.onnx"
+ort_session = ort.InferenceSession(onnx_model_path)
 
-# Load model
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = models.resnet18(pretrained=False)
-model.fc = nn.Linear(512, len(labels))
-model.load_state_dict(torch.load('../models/komering_character_resnet18.pth', map_location=device))
-model.to(device)
-model.eval()
+# Image transform
+def transform_image(img):
+    img = img.resize((50, 50))
+    img = np.array(img).astype(np.float32) / 255.0  # normalize 0-1
+    if img.shape[-1] == 4:  # RGBA -> RGB
+        img = img[..., :3]
+    img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
+    img = np.expand_dims(img, axis=0)   # add batch dim
+    return img
 
-# Transform for model input
-transform = transforms.Compose([transforms.Resize(IMG_SIZE), transforms.ToTensor()])
-
-# Predict function
 def predict_image(img):
-    img_t = transform(img).unsqueeze(0).to(device)
-    with torch.no_grad():
-        output = model(img_t)
-        probs = torch.softmax(output, dim=1).squeeze().cpu().numpy()
-        pred_idx = probs.argmax()
-    return labels[pred_idx], float(probs[pred_idx])
+    img_t = transform_image(img)
+    ort_inputs = {ort_session.get_inputs()[0].name: img_t}
+    ort_outs = ort_session.run(None, ort_inputs)
+    # softmax
+    logits = ort_outs[0]
+    exp_logits = np.exp(logits - np.max(logits))
+    probs = exp_logits / np.sum(exp_logits)
+    pred_idx = np.argmax(probs)
+    return labels[pred_idx], float(probs[0][pred_idx])
 
-# REST API endpoint
 @app.route('/api/predict', methods=['POST'])
-def api_predict():
+def predict():
     try:
-        data = request.json
-        if 'image' not in data or 'label' not in data:
-            return jsonify({'message': 'Missing image or label'}), 400
+        data = request.json['image'].split(',')[1]
+        chosen_label = request.json['label']  # label chosen by user
+        img = Image.open(io.BytesIO(base64.b64decode(data))).convert('RGB')
 
-        chosen_label = data['label']
-        img_data = data['image'].split(',')[1]
-        img = Image.open(io.BytesIO(base64.b64decode(img_data))).convert('RGB')
-
-        # Ensure white background and resize
-        white_bg = Image.new("RGB", IMG_SIZE, (255, 255, 255))
-        img_resized = img.resize(IMG_SIZE)
-        white_bg.paste(img_resized, mask=img_resized.split()[3] if img_resized.mode == 'RGBA' else None)
+        # Ensure white background
+        white_bg = Image.new("RGB", img.size, (255, 255, 255))
+        white_bg.paste(img, mask=img.split()[3] if img.mode == 'RGBA' else None)
         img = white_bg
 
-        # Predict
+        # Predict label and confidence
         pred_label, score = predict_image(img)
 
         # Save in chosen label folder
@@ -67,22 +62,23 @@ def api_predict():
         filename = f"{chosen_label}_{timestamp}.png"
         img.save(os.path.join(save_folder, filename))
 
-        # Message based on score
-        if score >= 0.85:
-            msg = "High confidence prediction"
-        elif score >= 0.60:
-            msg = "Moderate confidence prediction"
-        else:
-            msg = "Low confidence prediction"
-
+        # Return JSON with score in message
         return jsonify({
-            'label': chosen_label,
-            'score': round(score, 3),
-            'message': msg
+            "label": pred_label,
+            "message": f"Predicted '{pred_label}' with confidence {score:.2f}",
+            "score": score
         })
 
     except Exception as e:
-        return jsonify({'message': f'Error: {str(e)}'}), 500
+        return jsonify({
+            "label": "",
+            "message": f"Error: {str(e)}",
+            "score": 0.0
+        }), 400
+
+@app.route('/')
+def index():
+    return "Komering Character Recognition API is running"
 
 if __name__ == '__main__':
     app.run(debug=True)
