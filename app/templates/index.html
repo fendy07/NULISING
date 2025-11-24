@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Komering Character Recognition</title>
+<style>
+body { font-family: Arial; text-align: center; background: #f5f5f5; margin: 20px; }
+h1 { color: #333; }
+#canvas-container { display: inline-block; border: 2px solid #333; border-radius: 10px; background: #fff; }
+#canvas { border-radius: 10px; touch-action: none; }
+button, input[type=range], select { margin: 10px 5px; padding: 10px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; }
+#result { margin-top: 15px; font-size: 20px; font-weight: bold; color: #444; }
+</style>
+</head>
+<body>
+<h1>Komering Character Recognition</h1>
+
+<!-- Pen size slider -->
+<div>
+    <label for="penSize">Pen Size:</label>
+    <input type="range" id="penSize" min="1" max="50" value="10">
+    <span id="penValue">10</span>
+</div>
+
+<!-- Label selector -->
+<div>
+    <label for="labelSelect">Choose Label:</label>
+    <select id="labelSelect">
+        {% for label in labels %}
+        <option value="{{ label }}">{{ label }}</option>
+        {% endfor %}
+    </select>
+</div>
+
+<!-- Canvas -->
+<div id="canvas-container">
+    <canvas id="canvas" width="280" height="280"></canvas>
+</div>
+<br>
+<button id="clear">Clear</button>
+<button id="predict">Predict</button>
+<h2 id="result"></h2>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+ctx.fillStyle = 'white';
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+let penSize = 10;
+const penSlider = document.getElementById('penSize');
+const penValue = document.getElementById('penValue');
+penSlider.oninput = () => { penSize = penSlider.value; penValue.innerText = penSize; ctx.lineWidth = penSize; };
+
+ctx.lineWidth = penSize;
+ctx.lineCap = 'round';
+ctx.strokeStyle = 'black';
+
+let drawing = false;
+function startDrawing(e){
+    drawing = true;
+    const rect = canvas.getBoundingClientRect();
+    ctx.beginPath();
+    const x = e.touches ? e.touches[0].clientX - rect.left : e.clientX - rect.left;
+    const y = e.touches ? e.touches[0].clientY - rect.top : e.clientY - rect.top;
+    ctx.moveTo(x, y);
+}
+function draw(e){
+    if(!drawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.touches ? e.touches[0].clientX - rect.left : e.clientX - rect.left;
+    const y = e.touches ? e.touches[0].clientY - rect.top : e.clientY - rect.top;
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+}
+function stopDrawing(){ drawing = false; ctx.beginPath(); }
+
+canvas.addEventListener('mousedown', startDrawing);
+canvas.addEventListener('mousemove', draw);
+canvas.addEventListener('mouseup', stopDrawing);
+canvas.addEventListener('mouseleave', stopDrawing);
+canvas.addEventListener('touchstart', startDrawing);
+canvas.addEventListener('touchmove', draw);
+canvas.addEventListener('touchend', stopDrawing);
+
+document.getElementById('clear').onclick = () => {
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.lineWidth = penSize;
+    document.getElementById('result').innerText = '';
+}
+
+document.getElementById('predict').onclick = async () => {
+    const dataURL = canvas.toDataURL('image/png');
+    const chosenLabel = document.getElementById('labelSelect').value;
+    const response = await fetch('/predict', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({image: dataURL, label: chosenLabel})
+    });
+    const result = await response.json();
+    document.getElementById('result').innerText =
+        `Chosen Label: ${chosenLabel}, Predicted: ${result.prediction}, Score: ${result.score.toFixed(2)}`;
+}
+</script>
+</body>
+</html>
